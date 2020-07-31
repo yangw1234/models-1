@@ -28,7 +28,7 @@ import tensorflow as tf  # pylint: disable=g-bad-import-order
 from mlperf_compliance import mlperf_log
 from mlperf_resnet import imagenet_preprocessing
 from mlperf_resnet import resnet_model
-from mlperf_resnet import resnet_run_loop
+from mlperf_resnet import resnet_run_zoo as resnet_run_loop
 
 # import horovod if the above resnet_run_loop indiciates MPI
 if resnet_run_loop.is_mpi:

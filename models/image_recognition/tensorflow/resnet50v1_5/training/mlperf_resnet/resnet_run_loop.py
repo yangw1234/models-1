@@ -93,16 +93,18 @@ def process_record_dataset(dataset, is_training, batch_size, shuffle_buffer,
 
   # If we are training over multiple epochs before evaluating, repeat the
   # dataset for the appropriate number of epochs.
-  dataset = dataset.repeat(num_epochs)
+  # dataset = dataset.repeat(num_epochs)
+  #
+  # # Parse the raw records into images and labels. Testing has shown that setting
+  # # num_parallel_batches > 1 produces no improvement in throughput, since
+  # # batch_size is almost always much greater than the number of CPU cores.
+  # dataset = dataset.apply(
+  #     tf.data.experimental.map_and_batch(
+  #         lambda value: parse_record_fn(value, is_training, dtype),
+  #         batch_size=batch_size,
+  #         num_parallel_batches=1))
 
-  # Parse the raw records into images and labels. Testing has shown that setting
-  # num_parallel_batches > 1 produces no improvement in throughput, since
-  # batch_size is almost always much greater than the number of CPU cores.
-  dataset = dataset.apply(
-      tf.data.experimental.map_and_batch(
-          lambda value: parse_record_fn(value, is_training, dtype),
-          batch_size=batch_size,
-          num_parallel_batches=1))
+  dataset = dataset.map(lambda value: parse_record_fn(value, is_training, dtype))
 
   # Operations between the final prefetch and the get_next call to the iterator
   # will happen synchronously during run time. We prefetch here again to
@@ -133,9 +135,9 @@ def get_synth_input_fn(height, width, num_channels, num_classes):
     that can be used for iteration.
   """
   def input_fn(is_training, data_dir, batch_size, *args, **kwargs):  # pylint: disable=unused-argument
-    images = tf.zeros((batch_size, height, width, num_channels), tf.float32)
-    labels = tf.zeros((batch_size, num_classes), tf.int32)
-    return tf.data.Dataset.from_tensors((images, labels)).repeat()
+    images = tf.zeros((batch_size * 100, height, width, num_channels), tf.float32)
+    labels = tf.zeros((batch_size * 100,), tf.int32)
+    return tf.data.Dataset.from_tensor_slices((images, labels))
 
   return input_fn
 
@@ -298,6 +300,8 @@ def resnet_model_fn(features, labels, mode, model_class,
   # fp32 for numerical stability.
   logits = tf.cast(logits, tf.float32)
 
+  logits = tf.reshape(logits, shape=(-1, 1001))
+
   num_examples_metric = tf_mlperf_log.sum_metric(tensor=tf.shape(input=logits)[0], name=_NUM_EXAMPLES_NAME)
 
   predictions = {
@@ -378,6 +382,9 @@ def resnet_model_fn(features, labels, mode, model_class,
           learning_rate=learning_rate,
           momentum=momentum
       )
+
+    from zoo.tfpark.zoo_optimizer import ZooOptimizer
+    optimizer = ZooOptimizer(optimizer)
     if is_mpi:
       optimizer = hvd.DistributedOptimizer(optimizer)
 
@@ -396,7 +403,8 @@ def resnet_model_fn(features, labels, mode, model_class,
       minimize_op = optimizer.minimize(loss, global_step)
 
     update_ops = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.UPDATE_OPS)
-    train_op = tf.group(minimize_op, update_ops, num_examples_metric[1])
+    # train_op = tf.group(minimize_op, update_ops, num_examples_metric[1])
+    train_op = minimize_op
   else:
     train_op = None
 
@@ -484,33 +492,14 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
       intra_op_parallelism_threads=flags.intra_op_parallelism_threads,
       allow_soft_placement=True)
 
-  if flags.num_gpus == 0:
-    distribution = tf.distribute.OneDeviceStrategy('device:CPU:0')
-  elif flags.num_gpus == 1:
-    distribution = tf.distribute.OneDeviceStrategy('device:GPU:0')
-  else:
-    distribution = tf.distribute.MirroredStrategy(
-        num_gpus=flags.num_gpus
-    )
-
   mlperf_log.resnet_print(key=mlperf_log.RUN_SET_RANDOM_SEED, value=seed)
-  run_config = tf.estimator.RunConfig(train_distribute=distribution,
-                                      session_config=session_config,
+  run_config = tf.estimator.RunConfig(session_config=session_config,
                                       log_step_count_steps=10, # output logs more frequently
                                       tf_random_seed=seed)
 
-  mlperf_log.resnet_print(key=mlperf_log.INPUT_BATCH_SIZE,
-                          value=flags.batch_size)
 
-  if is_mpi:
-      if hvd.rank() == 0:
-          model_dir = os.path.join(flags.model_dir,"main")
-      else:
-          model_dir = os.path.join(flags.model_dir,"tmp{}".format(hvd.rank()))
-      benchmark_log_dir = flags.benchmark_log_dir if hvd.rank() == 0 else None
-  else:
-      model_dir = flags.model_dir
-      benchmark_log_dir = flags.benchmark_log_dir
+  model_dir = flags.model_dir
+  benchmark_log_dir = flags.benchmark_log_dir
 
   classifier = tf.estimator.Estimator(
       model_fn=model_function, model_dir=model_dir, config=run_config,
@@ -534,9 +523,7 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
   else:
     benchmark_logger = None
 
-  mlperf_log.resnet_print(key=mlperf_log.TRAIN_LOOP)
-
-  # for MPI only to figure out the steps per epoch or per eval, per worker 
+  # for MPI only to figure out the steps per epoch or per eval, per worker
   if is_mpi:
     num_eval_steps = _NUM_IMAGES['validation'] // flags.batch_size
     steps_per_epoch = _NUM_IMAGES['train'] // flags.batch_size
@@ -586,29 +573,42 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
     print('Starting a training cycle.')
 
     def input_fn_train():
-      return input_function(
+      dataset = input_function(
           is_training=True,
+          batch_size=flags.batch_size,
           data_dir=flags.data_dir,
-          batch_size=per_device_batch_size(flags.batch_size, flags.num_gpus),
-          num_epochs=flags.epochs_between_evals,
-          num_gpus=flags.num_gpus,
           dtype=flags.dtype
       )
-    if is_mpi:
-      # if max step is set, use max_step, not the steps_per_eval_per_worker
-      # assuming max_train_steps is smaller than steps_per_eval_per_worker
-      # Also assuming when -- steps is specified, the train epochs should
-      # be set to be equal to epochs_between_evals so that the
-      # range(flags.train_epochs // flags.epochs_between_evals) gets to be 1
-      if (flags.max_train_steps) and (flags.max_train_steps < steps_per_eval_per_worker):
-          train_steps = flags.max_train_steps
-      else:
-          train_steps = steps_per_eval_per_worker
+      from zoo.tfpark import TFDataset
+      dataset = TFDataset.from_tf_data_dataset(dataset, batch_size=flags.batch_size)
+      return dataset
 
-      classifier.train(input_fn=input_fn_train, hooks=train_hooks + [compliance_hook],
-              steps=train_steps)
-    else:
-      classifier.train(input_fn=input_fn_train, hooks=train_hooks + [compliance_hook], max_steps=flags.max_train_steps)
+
+
+    from zoo import init_nncontext
+
+    sc = init_nncontext()
+
+    from zoo.tfpark.estimator import TFEstimator
+
+    estimator = TFEstimator(classifier)
+
+    estimator.train(input_fn_train, steps=10)
+    # if is_mpi:
+    #   # if max step is set, use max_step, not the steps_per_eval_per_worker
+    #   # assuming max_train_steps is smaller than steps_per_eval_per_worker
+    #   # Also assuming when -- steps is specified, the train epochs should
+    #   # be set to be equal to epochs_between_evals so that the
+    #   # range(flags.train_epochs // flags.epochs_between_evals) gets to be 1
+    #   if (flags.max_train_steps) and (flags.max_train_steps < steps_per_eval_per_worker):
+    #       train_steps = flags.max_train_steps
+    #   else:
+    #       train_steps = steps_per_eval_per_worker
+    #
+    #   classifier.train(input_fn=input_fn_train, hooks=train_hooks + [compliance_hook],
+    #           steps=train_steps)
+    # else:
+    #   classifier.train(input_fn=input_fn_train, hooks=train_hooks + [compliance_hook], max_steps=flags.max_train_steps)
 
     #train_examples = int(_log_cache.pop()[_NUM_EXAMPLES_NAME])
     #mlperf_log.resnet_print(key=mlperf_log.INPUT_SIZE, value=train_examples)
