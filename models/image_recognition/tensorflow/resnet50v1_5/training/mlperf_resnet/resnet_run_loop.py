@@ -520,6 +520,13 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
       })
 
   print('Starting a training cycle.')
+  from zoo import init_nncontext
+  sc = init_nncontext()
+
+  from zoo import get_node_and_core_number
+
+  node_num, core_num = get_node_and_core_number()
+  num_workers = node_num
 
   def input_fn_train():
     dataset = input_function(
@@ -529,7 +536,7 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
           dtype=flags.dtype
       )
     from zoo.tfpark import TFDataset
-    dataset = TFDataset.from_tf_data_dataset(dataset, batch_size=flags.batch_size)
+    dataset = TFDataset.from_tf_data_dataset(dataset, batch_size=flags.batch_size * num_workers)
     return dataset
 
   def input_fn_eval():
@@ -542,12 +549,8 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
     )
     # dataset = dataset.batch(per_device_batch_size(flags.batch_size, flags.num_gpus), drop_remainder=True)
     from zoo.tfpark import TFDataset
-    dataset = TFDataset.from_tf_data_dataset(dataset, batch_per_thread=flags.batch_size)
+    dataset = TFDataset.from_tf_data_dataset(dataset, batch_per_thread=flags.batch_size // core_num)
     return dataset
-
-  from zoo import init_nncontext
-
-  sc = init_nncontext()
 
   from zoo.tfpark.estimator import TFEstimator
 

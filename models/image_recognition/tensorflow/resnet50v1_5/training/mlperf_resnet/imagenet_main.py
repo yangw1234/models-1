@@ -288,7 +288,7 @@ def imagenet_model_fn(features, labels, mode, params):
   from zoo import get_node_and_core_number
 
   node_num, core_num = get_node_and_core_number()
-  num_workers = node_num * core_num
+  num_workers = node_num
 
   global_batch_size = params['batch_size'] * num_workers
   learning_rate_fn = resnet_run_loop.learning_rate_with_decay(
