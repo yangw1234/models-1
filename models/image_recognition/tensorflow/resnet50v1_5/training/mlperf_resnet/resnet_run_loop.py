@@ -532,18 +532,6 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
     dataset = TFDataset.from_tf_data_dataset(dataset, batch_size=flags.batch_size)
     return dataset
 
-  from zoo import init_nncontext
-
-  sc = init_nncontext()
-
-  from zoo.tfpark.estimator import TFEstimator
-
-  estimator = TFEstimator(classifier)
-
-  estimator.train(input_fn_train, steps=10)
-
-  print('Starting to evaluate.')
-  # Evaluate the model and print results
   def input_fn_eval():
     dataset = input_function(
         is_training=False,
@@ -557,9 +545,22 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
     dataset = TFDataset.from_tf_data_dataset(dataset, batch_per_thread=flags.batch_size)
     return dataset
 
-  eval_results = estimator.evaluate(input_fn=input_fn_eval, eval_methods=["acc", "top5acc"],
-                                     steps=10)
-  print(eval_results)
+  from zoo import init_nncontext
+
+  sc = init_nncontext()
+
+  from zoo.tfpark.estimator import TFEstimator
+
+  estimator = TFEstimator(classifier)
+  steps_per_epoch = _NUM_IMAGES['train'] // flags.batch_size
+
+  for i in range(flags.train_epochs // flags.epochs_between_evals):
+
+    print("Starting to train epoch {} to {}".format(i * flags.epochs_between_evals + 1, (i + 1) * flags.epochs_between_evals))
+    estimator.train(input_fn_train, steps=steps_per_epoch * flags.epochs_between_evals)
+    print('Starting to evaluate.')
+    eval_results = estimator.evaluate(input_fn=input_fn_eval, eval_methods=["acc", "top5acc"])
+    print(eval_results)
 
 class ResnetArgParser(argparse.ArgumentParser):
   """Arguments for configuring and running a Resnet Model."""
