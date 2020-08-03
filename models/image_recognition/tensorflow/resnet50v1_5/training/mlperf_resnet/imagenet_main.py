@@ -171,7 +171,7 @@ def input_fn(is_training, data_dir, batch_size, num_epochs=1, num_gpus=None,
     dataset = dataset.shuffle(buffer_size=_NUM_TRAIN_FILES)
 
   # Convert to individual records
-  dataset = dataset.flat_map(tf.data.TFRecordDataset)
+  dataset = dataset.interleave(tf.data.TFRecordDataset, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
   return resnet_run_loop.process_record_dataset(
       dataset=dataset,
@@ -285,7 +285,11 @@ def imagenet_model_fn(features, labels, mode, params):
   else:
     base_lr = .128
 
-  num_workers = 1 if resnet_run_loop.is_mpi == 0 else hvd.size()
+  from zoo import get_node_and_core_number
+
+  node_num, core_num = get_node_and_core_number()
+  num_workers = node_num * core_num
+
   global_batch_size = params['batch_size'] * num_workers
   learning_rate_fn = resnet_run_loop.learning_rate_with_decay(
       batch_size=global_batch_size, batch_denom=256,
