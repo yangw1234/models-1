@@ -303,10 +303,11 @@ def resnet_model_fn(features, labels, mode, model_class,
   logits = tf.reshape(logits, shape=(-1, 1001))
 
   num_examples_metric = tf_mlperf_log.sum_metric(tensor=tf.shape(input=logits)[0], name=_NUM_EXAMPLES_NAME)
-
+  from tensorflow_estimator.python.estimator.canned import prediction_keys
   predictions = {
       'classes': tf.argmax(input=logits, axis=1),
-      'probabilities': tf.nn.softmax(logits, name='softmax_tensor')
+      'probabilities': tf.nn.softmax(logits, name='softmax_tensor'),
+      prediction_keys.PredictionKeys.LOGITS: logits
   }
 
 
@@ -403,6 +404,7 @@ def resnet_model_fn(features, labels, mode, model_class,
       minimize_op = optimizer.minimize(loss, global_step)
 
     update_ops = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.UPDATE_OPS)
+    # UPDATE_OPS collection will be called automatically by TFPark
     # train_op = tf.group(minimize_op, update_ops, num_examples_metric[1])
     train_op = minimize_op
   else:
@@ -499,7 +501,7 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
 
 
   model_dir = flags.model_dir
-  benchmark_log_dir = flags.benchmark_log_dir
+  # benchmark_log_dir = flags.benchmark_log_dir
 
   classifier = tf.estimator.Estimator(
       model_fn=model_function, model_dir=model_dir, config=run_config,
@@ -517,140 +519,47 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
           'use_bfloat16': flags.use_bfloat16
       })
 
-  if benchmark_log_dir is not None:
-    benchmark_logger = logger.BenchmarkLogger(benchmark_log_dir)
-    benchmark_logger.log_run_info('resnet')
-  else:
-    benchmark_logger = None
+  print('Starting a training cycle.')
 
-  # for MPI only to figure out the steps per epoch or per eval, per worker
-  if is_mpi:
-    num_eval_steps = _NUM_IMAGES['validation'] // flags.batch_size
-    steps_per_epoch = _NUM_IMAGES['train'] // flags.batch_size
-    steps_per_epoch_per_worker = steps_per_epoch // hvd.size()
-    steps_per_eval_per_worker = steps_per_epoch_per_worker * flags.epochs_between_evals
-
-  # The reference performs the first evaluation on the fourth epoch. (offset
-  # eval by 3 epochs)
-  mlperf_log.resnet_print(key=mlperf_log.EVAL_EPOCH_OFFSET, value=3)
-  success = False
-  for i in range(flags.train_epochs // flags.epochs_between_evals):
-    # Data for epochs_between_evals (i.e. 4 epochs between evals) worth of
-    # epochs is concatenated and run as a single block inside a session. For
-    # this reason we declare all of the epochs that will be run at the start.
-    # Submitters may report in a way which is reasonable for their control flow.
-    for j in range(flags.epochs_between_evals):
-      mlperf_log.resnet_print(key=mlperf_log.TRAIN_EPOCH,
-                              value=i * flags.epochs_between_evals + j)
-
-    flags.hooks += ["examplespersecondhook"]
-    if is_mpi:
-      train_hooks = [hvd.BroadcastGlobalVariablesHook(0)]
-      train_hooks = train_hooks + hooks_helper.get_train_hooks(
-          flags.hooks,
-          batch_size=flags.batch_size*hvd.size(),
-          benchmark_log_dir=flags.benchmark_log_dir)
-    else:
-      train_hooks = hooks_helper.get_train_hooks(
-          flags.hooks,
-          batch_size=flags.batch_size,
-          benchmark_log_dir=flags.benchmark_log_dir)
-
-    _log_cache = []
-    def formatter(x):
-      """Abuse side effects to get tensors out of the model_fn."""
-      if _log_cache:
-        _log_cache.pop()
-      _log_cache.append(x.copy())
-      return str(x)
-
-    compliance_hook = tf.estimator.LoggingTensorHook(
-      tensors={_NUM_EXAMPLES_NAME: _NUM_EXAMPLES_NAME},
-      every_n_iter=int(1e10),
-      at_end=True,
-      formatter=formatter)
-
-    print('Starting a training cycle.')
-
-    def input_fn_train():
-      dataset = input_function(
+  def input_fn_train():
+    dataset = input_function(
           is_training=True,
           batch_size=flags.batch_size,
           data_dir=flags.data_dir,
           dtype=flags.dtype
       )
-      from zoo.tfpark import TFDataset
-      dataset = TFDataset.from_tf_data_dataset(dataset, batch_size=flags.batch_size)
-      return dataset
+    from zoo.tfpark import TFDataset
+    dataset = TFDataset.from_tf_data_dataset(dataset, batch_size=flags.batch_size)
+    return dataset
 
+  from zoo import init_nncontext
 
+  sc = init_nncontext()
 
-    from zoo import init_nncontext
+  from zoo.tfpark.estimator import TFEstimator
 
-    sc = init_nncontext()
+  estimator = TFEstimator(classifier)
 
-    from zoo.tfpark.estimator import TFEstimator
+  estimator.train(input_fn_train, steps=10)
 
-    estimator = TFEstimator(classifier)
+  print('Starting to evaluate.')
+  # Evaluate the model and print results
+  def input_fn_eval():
+    dataset = input_function(
+        is_training=False,
+        data_dir=flags.data_dir,
+        batch_size=per_device_batch_size(flags.batch_size, flags.num_gpus),
+        num_epochs=1,
+        dtype=flags.dtype
+    )
+    # dataset = dataset.batch(per_device_batch_size(flags.batch_size, flags.num_gpus), drop_remainder=True)
+    from zoo.tfpark import TFDataset
+    dataset = TFDataset.from_tf_data_dataset(dataset, batch_per_thread=flags.batch_size)
+    return dataset
 
-    estimator.train(input_fn_train, steps=10)
-    # if is_mpi:
-    #   # if max step is set, use max_step, not the steps_per_eval_per_worker
-    #   # assuming max_train_steps is smaller than steps_per_eval_per_worker
-    #   # Also assuming when -- steps is specified, the train epochs should
-    #   # be set to be equal to epochs_between_evals so that the
-    #   # range(flags.train_epochs // flags.epochs_between_evals) gets to be 1
-    #   if (flags.max_train_steps) and (flags.max_train_steps < steps_per_eval_per_worker):
-    #       train_steps = flags.max_train_steps
-    #   else:
-    #       train_steps = steps_per_eval_per_worker
-    #
-    #   classifier.train(input_fn=input_fn_train, hooks=train_hooks + [compliance_hook],
-    #           steps=train_steps)
-    # else:
-    #   classifier.train(input_fn=input_fn_train, hooks=train_hooks + [compliance_hook], max_steps=flags.max_train_steps)
-
-    #train_examples = int(_log_cache.pop()[_NUM_EXAMPLES_NAME])
-    #mlperf_log.resnet_print(key=mlperf_log.INPUT_SIZE, value=train_examples)
-
-    print('Starting to evaluate.')
-    # Evaluate the model and print results
-    def input_fn_eval():
-      return input_function(
-          is_training=False,
-          data_dir=flags.data_dir,
-          batch_size=per_device_batch_size(flags.batch_size, flags.num_gpus),
-          num_epochs=1,
-          dtype=flags.dtype
-      )
-
-
-    mlperf_log.resnet_print(key=mlperf_log.EVAL_START)
-    # flags.max_train_steps is generally associated with testing and profiling.
-    # As a result it is frequently called with synthetic data, which will
-    # iterate forever. Passing steps=flags.max_train_steps allows the eval
-    # (which is generally unimportant in those circumstances) to terminate.
-    # Note that eval will run for max_train_steps each loop, regardless of the
-    # global_step count.
-    eval_results = classifier.evaluate(input_fn=input_fn_eval,
-                                       steps=flags.max_train_steps)
-    mlperf_log.resnet_print(key=mlperf_log.EVAL_STOP)
-    mlperf_log.resnet_print(key=mlperf_log.EVAL_SIZE, value=int(eval_results[_NUM_EXAMPLES_NAME]))
-    mlperf_log.resnet_print(key=mlperf_log.EVAL_ACCURACY, value=float(eval_results['accuracy']))
-    mlperf_log.resnet_print(key=mlperf_log.EVAL_TARGET, value=flags.stop_threshold)
-    print(eval_results)
-
-    if benchmark_logger:
-      benchmark_logger.log_estimator_evaluation_result(eval_results)
-
-    if model_helpers.past_stop_threshold(
-        flags.stop_threshold, eval_results['accuracy']):
-      success = True
-      break
-
-  mlperf_log.resnet_print(key=mlperf_log.RUN_STOP, value={"success": success})
-  mlperf_log.resnet_print(key=mlperf_log.RUN_FINAL)
-
+  eval_results = estimator.evaluate(input_fn=input_fn_eval, eval_methods=["acc", "top5acc"],
+                                     steps=10)
+  print(eval_results)
 
 class ResnetArgParser(argparse.ArgumentParser):
   """Arguments for configuring and running a Resnet Model."""
