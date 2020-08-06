@@ -104,7 +104,7 @@ def process_record_dataset(dataset, is_training, batch_size, shuffle_buffer,
   #         batch_size=batch_size,
   #         num_parallel_batches=1))
 
-  dataset = dataset.map(lambda value: parse_record_fn(value, is_training, dtype))
+  dataset = dataset.map(lambda value: parse_record_fn(value, is_training, dtype), num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
   # Operations between the final prefetch and the get_next call to the iterator
   # will happen synchronously during run time. We prefetch here again to
@@ -135,8 +135,8 @@ def get_synth_input_fn(height, width, num_channels, num_classes):
     that can be used for iteration.
   """
   def input_fn(is_training, data_dir, batch_size, *args, **kwargs):  # pylint: disable=unused-argument
-    images = tf.zeros((batch_size * 100, height, width, num_channels), tf.float32)
-    labels = tf.zeros((batch_size * 100,), tf.int32)
+    images = tf.zeros((batch_size * 10, height, width, num_channels), tf.float32)
+    labels = tf.zeros((batch_size * 10,), tf.int32)
     return tf.data.Dataset.from_tensor_slices((images, labels))
 
   return input_fn
@@ -531,10 +531,11 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
   def input_fn_train():
     dataset = input_function(
           is_training=True,
-          batch_size=flags.batch_size,
+          batch_size=flags.batch_size, # this takes no effect
           data_dir=flags.data_dir,
           dtype=flags.dtype
       )
+    # dataset = dataset.take(20000)
     from zoo.tfpark import TFDataset
     dataset = TFDataset.from_tf_data_dataset(dataset, batch_size=flags.batch_size * num_workers)
     return dataset
@@ -547,10 +548,13 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
         num_epochs=1,
         dtype=flags.dtype
     )
-    # dataset = dataset.batch(per_device_batch_size(flags.batch_size, flags.num_gpus), drop_remainder=True)
+    # dataset = dataset.take(400)
     from zoo.tfpark import TFDataset
     dataset = TFDataset.from_tf_data_dataset(dataset, batch_per_thread=flags.batch_size // core_num)
     return dataset
+
+  from zoo import init_nncontext
+  sc = init_nncontext()
 
   from zoo.tfpark.estimator import TFEstimator
 
@@ -560,7 +564,7 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
   for i in range(flags.train_epochs // flags.epochs_between_evals):
 
     print("Starting to train epoch {} to {}".format(i * flags.epochs_between_evals + 1, (i + 1) * flags.epochs_between_evals))
-    estimator.train(input_fn_train, steps=steps_per_epoch * flags.epochs_between_evals)
+    estimator.train(input_fn_train, steps=steps_per_epoch * flags.epochs_between_evals)# , session_config=tf.ConfigProto(inter_op_parallelism_threads=1, intra_op_parallelism_threads=6))
     print('Starting to evaluate.')
     eval_results = estimator.evaluate(input_fn=input_fn_eval, eval_methods=["acc", "top5acc"])
     print(eval_results)
