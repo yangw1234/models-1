@@ -37,8 +37,6 @@ from __future__ import print_function
 
 import tensorflow as tf
 
-from mlperf_compliance import mlperf_log
-
 
 _R_MEAN = 123.68
 _G_MEAN = 116.78
@@ -79,16 +77,6 @@ def _decode_crop_and_flip(image_buffer, num_channels):
   area_range=[0.05, 1.0]
   max_attempts=100
 
-  mlperf_log.resnet_print(key=mlperf_log.INPUT_DISTORTED_CROP_MIN_OBJ_COV,
-                          value=min_object_covered)
-  mlperf_log.resnet_print(key=mlperf_log.INPUT_DISTORTED_CROP_RATIO_RANGE,
-                          value=aspect_ratio_range)
-  mlperf_log.resnet_print(key=mlperf_log.INPUT_DISTORTED_CROP_AREA_RANGE,
-                          value=area_range)
-  mlperf_log.resnet_print(key=mlperf_log.INPUT_DISTORTED_CROP_MAX_ATTEMPTS,
-                          value=max_attempts)
-  mlperf_log.resnet_print(key=mlperf_log.INPUT_CROP_USES_BBOXES, value=False)
-
   bbox = tf.constant([0.0, 0.0, 1.0, 1.0],
                      dtype=tf.float32, shape=[1, 1, 4])   #From the entire image
   sample_distorted_bounding_box = tf.image.sample_distorted_bounding_box(
@@ -111,7 +99,6 @@ def _decode_crop_and_flip(image_buffer, num_channels):
       image_buffer, crop_window, channels=num_channels)
 
   # Flip to add a little more random distortion in.
-  mlperf_log.resnet_print(key=mlperf_log.INPUT_RANDOM_FLIP)
   cropped = tf.image.random_flip_left_right(cropped)
   return cropped
 
@@ -129,9 +116,6 @@ def _central_crop(image, crop_height, crop_width):
   """
   shape = tf.shape(input=image)
   height, width = shape[0], shape[1]
-
-  mlperf_log.resnet_print(key=mlperf_log.INPUT_CENTRAL_CROP,
-                          value=[crop_height, crop_width])
 
   amount_to_be_cropped_h = (height - crop_height)
   crop_top = amount_to_be_cropped_h // 2
@@ -168,9 +152,6 @@ def _mean_image_subtraction(image, means, num_channels):
 
   if len(means) != num_channels:
     raise ValueError('len(means) must match the number of channels')
-
-  mlperf_log.resnet_print(key=mlperf_log.INPUT_MEAN_SUBTRACTION,
-                          value=means)
 
   # We have a 1-D tensor of means; convert to 3-D.
   means = tf.expand_dims(tf.expand_dims(means, 0), 0)
@@ -220,9 +201,6 @@ def _aspect_preserving_resize(image, resize_min):
   Returns:
     resized_image: A 3-D tensor containing the resized image.
   """
-  mlperf_log.resnet_print(key=mlperf_log.INPUT_RESIZE_ASPECT_PRESERVING,
-                          value={"min": resize_min})
-
   shape = tf.shape(input=image)
   height, width = shape[0], shape[1]
 
@@ -273,16 +251,12 @@ def preprocess_image(image_buffer, output_height, output_width,
     # For training, we want to randomize some of the distortions.
     image = _decode_crop_and_flip(image_buffer, num_channels)
 
-    mlperf_log.resnet_print(key=mlperf_log.INPUT_RESIZE,
-                            value=[output_height, output_width])
     image = _resize_image(image, output_height, output_width)
   else:
     # For validation, we want to decode, resize, then just crop the middle.
     image = tf.image.decode_jpeg(image_buffer, channels=num_channels)
     image = _aspect_preserving_resize(image, _RESIZE_MIN)
 
-    mlperf_log.resnet_print(key=mlperf_log.INPUT_RESIZE,
-                            value=[output_height, output_width])
     image = _central_crop(image, output_height, output_width)
 
   image.set_shape([output_height, output_width, num_channels])

@@ -28,24 +28,8 @@ import os
 
 import tensorflow as tf  # pylint: disable=g-bad-import-order
 
-from mlperf_compliance import mlperf_log
-from mlperf_compliance import tf_mlperf_log
-from mlperf_resnet import resnet_model
-from mlperf_utils.arg_parsers import parsers
-from mlperf_utils.export import export
-from mlperf_utils.logs import hooks_helper
-from mlperf_utils.logs import logger
-from mlperf_utils.misc import model_helpers
-
-global is_mpi
-try:
-    import horovod.tensorflow as hvd
-    hvd.init()
-    is_mpi = hvd.size()
-except ImportError:
-    is_mpi = 0
-    print("No MPI horovod support, this is running in no-MPI mode!")
-
+import resnet_model
+import parsers
 
 _NUM_EXAMPLES_NAME = "num_examples"
 _NUM_IMAGES = {
@@ -84,11 +68,8 @@ def process_record_dataset(dataset, is_training, batch_size, shuffle_buffer,
   # load input files as we go through shuffling and processing.
   dataset = dataset.prefetch(buffer_size=batch_size)
   if is_training:
-    if is_mpi:
-      dataset = dataset.shard(hvd.size(), hvd.rank())
     # Shuffle the records. Note that we shuffle before repeating to ensure
     # that the shuffling respects epoch boundaries.
-    mlperf_log.resnet_print(key=mlperf_log.INPUT_ORDER)
     dataset = dataset.shuffle(buffer_size=shuffle_buffer)
 
   # If we are training over multiple epochs before evaluating, repeat the
@@ -302,7 +283,6 @@ def resnet_model_fn(features, labels, mode, model_class,
 
   logits = tf.reshape(logits, shape=(-1, 1001))
 
-  num_examples_metric = tf_mlperf_log.sum_metric(tensor=tf.shape(input=logits)[0], name=_NUM_EXAMPLES_NAME)
   from tensorflow_estimator.python.estimator.canned import prediction_keys
   predictions = {
       'classes': tf.argmax(input=logits, axis=1),
@@ -321,7 +301,6 @@ def resnet_model_fn(features, labels, mode, model_class,
         })
 
   # Calculate loss, which includes softmax cross entropy and L2 regularization.
-  mlperf_log.resnet_print(key=mlperf_log.MODEL_HP_LOSS_FN, value=mlperf_log.CCE)
 
   if label_smoothing != 0.0:
     one_hot_labels = tf.one_hot(labels, 1001)
@@ -342,12 +321,7 @@ def resnet_model_fn(features, labels, mode, model_class,
     return 'batch_normalization' not in name
   loss_filter_fn = loss_filter_fn or exclude_batch_norm
 
-  mlperf_log.resnet_print(key=mlperf_log.MODEL_EXCLUDE_BN_FROM_L2,
-                          value=not loss_filter_fn('batch_normalization'))
-
   # Add weight decay to the loss.
-  mlperf_log.resnet_print(key=mlperf_log.MODEL_L2_REGULARIZATION,
-                          value=weight_decay)
   l2_loss = weight_decay * tf.add_n(
       # loss is computed using fp32 for numerical stability.
       [tf.nn.l2_loss(tf.cast(v, tf.float32)) for v in tf.compat.v1.trainable_variables()
@@ -360,17 +334,9 @@ def resnet_model_fn(features, labels, mode, model_class,
 
     learning_rate = learning_rate_fn(global_step)
 
-    log_id = mlperf_log.resnet_print(key=mlperf_log.OPT_LR, deferred=True)
-    learning_rate = tf_mlperf_log.log_deferred(op=learning_rate, log_id=log_id,
-                                               every_n=100)
-
     # Create a tensor named learning_rate for logging purposes
     tf.identity(learning_rate, name='learning_rate')
     tf.compat.v1.summary.scalar('learning_rate', learning_rate)
-
-    mlperf_log.resnet_print(key=mlperf_log.OPT_NAME,
-                            value=mlperf_log.SGD_WITH_MOMENTUM)
-    mlperf_log.resnet_print(key=mlperf_log.OPT_MOMENTUM, value=momentum)
 
     if enable_lars:
       optimizer = tf.contrib.opt.LARSOptimizer(
@@ -386,8 +352,6 @@ def resnet_model_fn(features, labels, mode, model_class,
 
     from zoo.tfpark.zoo_optimizer import ZooOptimizer
     optimizer = ZooOptimizer(optimizer)
-    if is_mpi:
-      optimizer = hvd.DistributedOptimizer(optimizer)
 
     if loss_scale != 1:
       # When computing fp16 gradients, often intermediate tensor values are
@@ -417,14 +381,7 @@ def resnet_model_fn(features, labels, mode, model_class,
                                                   name='top_5_op'))
 
   metrics = {'accuracy': accuracy,
-             'accuracy_top_5': accuracy_top_5,
-             _NUM_EXAMPLES_NAME: num_examples_metric}
-
-  # Create a tensor named train_accuracy for logging purposes
-  tf.identity(accuracy[1], name='train_accuracy')
-  tf.identity(accuracy_top_5[1], name='train_accuracy_top_5')
-  tf.compat.v1.summary.scalar('train_accuracy', accuracy[1])
-  tf.compat.v1.summary.scalar('train_accuracy_top_5', accuracy_top_5[1])
+             'accuracy_top_5': accuracy_top_5}
 
   return tf.estimator.EstimatorSpec(
       mode=mode,
@@ -480,8 +437,6 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
       This is only used if flags.export_dir is passed.
   """
 
-  mlperf_log.resnet_print(key=mlperf_log.RUN_START)
-
   # Using the Winograd non-fused algorithms provides a small performance boost.
   os.environ['TF_ENABLE_WINOGRAD_NONFUSED'] = '1'
 
@@ -494,7 +449,6 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
       intra_op_parallelism_threads=flags.intra_op_parallelism_threads,
       allow_soft_placement=True)
 
-  mlperf_log.resnet_print(key=mlperf_log.RUN_SET_RANDOM_SEED, value=seed)
   run_config = tf.estimator.RunConfig(session_config=session_config,
                                       log_step_count_steps=10, # output logs more frequently
                                       tf_random_seed=seed)

@@ -25,14 +25,9 @@ import random
 import numpy.random
 import tensorflow as tf  # pylint: disable=g-bad-import-order
 
-from mlperf_compliance import mlperf_log
-from mlperf_resnet import imagenet_preprocessing
-from mlperf_resnet import resnet_model
-from mlperf_resnet import resnet_run_loop
-
-# import horovod if the above resnet_run_loop indiciates MPI
-if resnet_run_loop.is_mpi:
-  import horovod.tensorflow as hvd
+import imagenet_preprocessing
+import resnet_model
+import resnet_run_loop
 
 _DEFAULT_IMAGE_SIZE = 224
 _NUM_CHANNELS = 3
@@ -162,7 +157,6 @@ def input_fn(is_training, data_dir, batch_size, num_epochs=1, num_gpus=None,
   Returns:
     A dataset that can be used for iteration.
   """
-  mlperf_log.resnet_print(key=mlperf_log.INPUT_ORDER)
   filenames = get_filenames(is_training, data_dir)
   dataset = tf.data.Dataset.from_tensor_slices(filenames)
 
@@ -331,23 +325,16 @@ def main(argv):
   seed = int(argv[1])
   print('Setting random seed = ', seed)
   print('special seeding')
-  mlperf_log.resnet_print(key=mlperf_log.RUN_SET_RANDOM_SEED, value=seed)
   random.seed(seed)
   tf.compat.v1.set_random_seed(seed)
   numpy.random.seed(seed)
 
-  mlperf_log.resnet_print(key=mlperf_log.PREPROC_NUM_TRAIN_EXAMPLES,
-                          value=_NUM_IMAGES['train'])
-  mlperf_log.resnet_print(key=mlperf_log.PREPROC_NUM_EVAL_EXAMPLES,
-                          value=_NUM_IMAGES['validation'])
   input_function = flags.use_synthetic_data and get_synth_input_fn() or input_fn
 
   resnet_run_loop.resnet_main(seed,
       flags, imagenet_model_fn, input_function,
       shape=[_DEFAULT_IMAGE_SIZE, _DEFAULT_IMAGE_SIZE, _NUM_CHANNELS])
 
-
 if __name__ == '__main__':
   tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.INFO)
-  mlperf_log.ROOT_DIR_RESNET = os.path.split(os.path.abspath(__file__))[0]
   main(argv=sys.argv)

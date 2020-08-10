@@ -33,10 +33,6 @@ from __future__ import print_function
 
 import tensorflow as tf
 
-from mlperf_compliance import mlperf_log
-from mlperf_compliance import resnet_log_helper
-
-
 _BATCH_NORM_DECAY = 0.9
 _BATCH_NORM_EPSILON = 1e-5
 DEFAULT_VERSION = 2
@@ -56,10 +52,6 @@ def batch_norm(inputs, training, data_format):
       inputs=inputs, axis=1 if data_format == 'channels_first' else 3,
       momentum=_BATCH_NORM_DECAY, epsilon=_BATCH_NORM_EPSILON, center=True,
       scale=True, training=training, fused=True)
-
-  resnet_log_helper.log_batch_norm(
-      input_tensor=inputs, output_tensor=outputs, momentum=_BATCH_NORM_DECAY,
-      epsilon=_BATCH_NORM_EPSILON, center=True, scale=True, training=training)
 
   return outputs
 
@@ -107,10 +99,6 @@ def conv2d_fixed_padding(inputs, filters, kernel_size, strides, data_format):
           distribution="truncated_normal"),
       data_format=data_format)
 
-  resnet_log_helper.log_conv2d(
-      input_tensor=inputs_for_logging, output_tensor=outputs, stride=strides,
-      filters=filters, initializer=mlperf_log.TRUNCATED_NORMAL, use_bias=False)
-
   return outputs
 
 
@@ -153,15 +141,10 @@ def _bottleneck_block_v1(inputs, filters, training, projection_shortcut,
   Returns:
     The output tensor of the block; shape should match inputs.
   """
-  resnet_log_helper.log_begin_block(
-      input_tensor=inputs, block_type=mlperf_log.BOTTLENECK_BLOCK)
-
   shortcut = inputs
 
   if projection_shortcut is not None:
     shortcut = projection_shortcut(inputs)
-    resnet_log_helper.log_projection(input_tensor=inputs,
-                                     output_tensor=shortcut)
     shortcut = batch_norm(inputs=shortcut, training=training,
                           data_format=data_format)
 
@@ -170,7 +153,6 @@ def _bottleneck_block_v1(inputs, filters, training, projection_shortcut,
       data_format=data_format)
   inputs = batch_norm(inputs, training, data_format)
 
-  mlperf_log.resnet_print(key=mlperf_log.MODEL_HP_RELU)
   inputs = tf.nn.relu(inputs)
 
   inputs = conv2d_fixed_padding(
@@ -178,7 +160,6 @@ def _bottleneck_block_v1(inputs, filters, training, projection_shortcut,
       data_format=data_format)
   inputs = batch_norm(inputs, training, data_format)
 
-  mlperf_log.resnet_print(key=mlperf_log.MODEL_HP_RELU)
   inputs = tf.nn.relu(inputs)
 
   inputs = conv2d_fixed_padding(
@@ -186,15 +167,12 @@ def _bottleneck_block_v1(inputs, filters, training, projection_shortcut,
       data_format=data_format)
   inputs = batch_norm(inputs, training, data_format)
 
-  mlperf_log.resnet_print(key=mlperf_log.MODEL_HP_SHORTCUT_ADD)
   # TODO(nhasabni): temporarily replacing Add by AddN for performance.
   # Remove it later once we optimize this in graph.
   inputs = tf.math.add_n([inputs, shortcut])
 
-  mlperf_log.resnet_print(key=mlperf_log.MODEL_HP_RELU)
   inputs = tf.nn.relu(inputs)
 
-  resnet_log_helper.log_end_block(output_tensor=inputs)
   return inputs
 
 
@@ -394,9 +372,6 @@ class Model(object):
     """
 
     # Drop batch size from shape logging.
-    mlperf_log.resnet_print(key=mlperf_log.MODEL_HP_INITIAL_SHAPE,
-                            value=inputs.shape.as_list()[1:])
-
     with self._model_variable_scope():
       if self.data_format == 'channels_first':
         # Convert the inputs from channels_last (NHWC) to channels_first (NCHW).
@@ -416,7 +391,6 @@ class Model(object):
       if self.resnet_version == 1:
         inputs = batch_norm(inputs, training, self.data_format)
 
-        mlperf_log.resnet_print(key=mlperf_log.MODEL_HP_RELU)
         inputs = tf.nn.relu(inputs)
 
       if self.first_pool_size:
@@ -424,7 +398,6 @@ class Model(object):
             inputs=inputs, pool_size=self.first_pool_size,
             strides=self.first_pool_stride, padding='SAME',
             data_format=self.data_format)
-        resnet_log_helper.log_max_pool(input_tensor=inputs, output_tensor=pooled_inputs)
         inputs = tf.identity(pooled_inputs, 'initial_max_pool')
 
       for i, num_blocks in enumerate(self.block_sizes):
@@ -440,7 +413,6 @@ class Model(object):
       if self.pre_activation:
         inputs = batch_norm(inputs, training, self.data_format)
 
-        mlperf_log.resnet_print(key=mlperf_log.MODEL_HP_RELU)
         inputs = tf.nn.relu(inputs)
 
       # The current top layer has shape
@@ -453,15 +425,10 @@ class Model(object):
       inputs = tf.identity(inputs, 'final_reduce_mean')
 
       inputs = tf.reshape(inputs, [-1, self.final_size])
-      mlperf_log.resnet_print(key=mlperf_log.MODEL_HP_DENSE,
-                              value=self.num_classes)
       inputs = tf.compat.v1.layers.dense(
         inputs=inputs,
         units=self.num_classes,
         kernel_initializer=tf.compat.v1.random_normal_initializer(stddev=.01))
       inputs = tf.identity(inputs, 'final_dense')
 
-      # Drop batch size from shape logging.
-      mlperf_log.resnet_print(key=mlperf_log.MODEL_HP_FINAL_SHAPE,
-                              value=inputs.shape.as_list()[1:])
       return inputs
