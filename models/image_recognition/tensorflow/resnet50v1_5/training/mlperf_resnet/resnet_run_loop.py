@@ -31,11 +31,19 @@ import tensorflow as tf  # pylint: disable=g-bad-import-order
 import resnet_model
 import parsers
 
+from pdb_clone import pdb
+from zoo.feature.common import ChainedPreprocessing, FeatureSet
+
+from zoo.feature.image import *
+
+
 _NUM_EXAMPLES_NAME = "num_examples"
 _NUM_IMAGES = {
         'train': 1281167,
         'validation': 50000
 }
+
+assert tf.__version__ == "1.15.0"
 
 
 ################################################################################
@@ -79,13 +87,14 @@ def process_record_dataset(dataset, is_training, batch_size, shuffle_buffer,
   # # Parse the raw records into images and labels. Testing has shown that setting
   # # num_parallel_batches > 1 produces no improvement in throughput, since
   # # batch_size is almost always much greater than the number of CPU cores.
-  # dataset = dataset.apply(
-  #     tf.data.experimental.map_and_batch(
-  #         lambda value: parse_record_fn(value, is_training, dtype),
-  #         batch_size=batch_size,
-  #         num_parallel_batches=1))
+  dataset = dataset.apply(
+      tf.data.experimental.map_and_batch(
+          lambda value: parse_record_fn(value, is_training, dtype),
+          batch_size=batch_size,
+          num_parallel_batches=1))
 
-  dataset = dataset.map(lambda value: parse_record_fn(value, is_training, dtype), num_parallel_calls=tf.data.experimental.AUTOTUNE)
+  # dataset = dataset.map(lambda value: parse_record_fn(value, is_training, dtype), 2)
+  # dataset = dataset.batch(128)
 
   # Operations between the final prefetch and the get_next call to the iterator
   # will happen synchronously during run time. We prefetch here again to
@@ -94,6 +103,7 @@ def process_record_dataset(dataset, is_training, batch_size, shuffle_buffer,
   # allows DistributionStrategies to adjust how many batches to fetch based
   # on how many devices are present.
   dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+
 
   return dataset
 
@@ -116,8 +126,8 @@ def get_synth_input_fn(height, width, num_channels, num_classes):
     that can be used for iteration.
   """
   def input_fn(is_training, data_dir, batch_size, *args, **kwargs):  # pylint: disable=unused-argument
-    images = tf.zeros((batch_size * 10, height, width, num_channels), tf.float32)
-    labels = tf.zeros((batch_size * 10,), tf.int32)
+    images = tf.zeros((batch_size * 100, height, width, num_channels), tf.float32)
+    labels = tf.zeros((batch_size * 100,), tf.int32)
     return tf.data.Dataset.from_tensor_slices((images, labels))
 
   return input_fn
@@ -263,6 +273,8 @@ def resnet_model_fn(features, labels, mode, model_class,
 
   # Generate a summary node for the images
   tf.compat.v1.summary.image('images', features, max_outputs=6)
+  
+  print(dtype)
 
   # Checks that features/images have same data type being used for calculations.
   assert features.dtype == dtype
@@ -276,12 +288,17 @@ def resnet_model_fn(features, labels, mode, model_class,
 
   logits = model(features, mode == tf.estimator.ModeKeys.TRAIN)
 
+  print(f"logits dtype is logits {logits}")
+
   # This acts as a no-op if the logits are already in fp32 (provided logits are
   # not a SparseTensor). If dtype is is low precision, logits must be cast to
   # fp32 for numerical stability.
   logits = tf.cast(logits, tf.float32)
 
   logits = tf.reshape(logits, shape=(-1, 1001))
+  #wzr: print the structure of model
+  print("structure-------------------")
+  variables = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
 
   from tensorflow_estimator.python.estimator.canned import prediction_keys
   predictions = {
@@ -308,6 +325,7 @@ def resnet_model_fn(features, labels, mode, model_class,
         logits=logits, onehot_labels=one_hot_labels,
         label_smoothing=label_smoothing)
   else:
+    labels = tf.reshape(labels, shape=(-1,))
     cross_entropy = tf.compat.v1.losses.sparse_softmax_cross_entropy(
         logits=logits, labels=labels)
 
@@ -485,26 +503,28 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
   def input_fn_train():
     dataset = input_function(
           is_training=True,
-          batch_size=flags.batch_size, # this takes no effect
+          batch_size=flags.batch_size,
           data_dir=flags.data_dir,
           dtype=flags.dtype
       )
-    # dataset = dataset.take(20000)
+    print("dataset is")
+    print(dataset)
     from zoo.tfpark import TFDataset
-    dataset = TFDataset.from_tf_data_dataset(dataset, batch_size=flags.batch_size * num_workers)
+    dataset = TFDataset.from_tf_data_dataset(dataset, batch_size=flags.batch_size * num_workers, batch_outside=True, inter_threads=2, intra_threads=6)
+    print("second dataset is")
+    print(dataset)
     return dataset
 
   def input_fn_eval():
     dataset = input_function(
         is_training=False,
         data_dir=flags.data_dir,
-        batch_size=per_device_batch_size(flags.batch_size, flags.num_gpus),
+        batch_size=flags.batch_size,
         num_epochs=1,
         dtype=flags.dtype
     )
-    # dataset = dataset.take(400)
     from zoo.tfpark import TFDataset
-    dataset = TFDataset.from_tf_data_dataset(dataset, batch_per_thread=flags.batch_size // core_num)
+    dataset = TFDataset.from_tf_data_dataset(dataset, batch_per_thread=flags.batch_size // core_num, batch_outside=True, inter_threads=2, intra_threads=6)
     return dataset
 
   from zoo import init_nncontext
@@ -512,16 +532,29 @@ def resnet_main(seed, flags, model_function, input_function, shape=None):
 
   from zoo.tfpark.estimator import TFEstimator
 
+  # estimator = TFEstimator(classifier)
+  #steps_per_epoch = _NUM_IMAGES['train'] // flags.batch_size  # yabai: wrong steps number, should be divided by total batchsize
+  steps_per_epoch = _NUM_IMAGES['train'] // (flags.batch_size * num_workers)  # yabai: wrong steps number, should be divided by total batchsize
+  # steps_per_epoch = 2
   estimator = TFEstimator(classifier)
-  steps_per_epoch = _NUM_IMAGES['train'] // flags.batch_size
 
-  for i in range(flags.train_epochs // flags.epochs_between_evals):
+  if not flags.val_only:
+      estimator.train(input_fn_train, steps=steps_per_epoch * flags.train_epochs, session_config=tf.ConfigProto(inter_op_parallelism_threads=1, intra_op_parallelism_threads=4))
 
-    print("Starting to train epoch {} to {}".format(i * flags.epochs_between_evals + 1, (i + 1) * flags.epochs_between_evals))
-    estimator.train(input_fn_train, steps=steps_per_epoch * flags.epochs_between_evals)# , session_config=tf.ConfigProto(inter_op_parallelism_threads=1, intra_op_parallelism_threads=6))
-    print('Starting to evaluate.')
-    eval_results = estimator.evaluate(input_fn=input_fn_eval, eval_methods=["acc", "top5acc"])
-    print(eval_results)
+
+  # estimator.train(input_fn_train, steps=steps_per_epoch * flags.train_epochs, session_config=tf.ConfigProto(inter_op_parallelism_threads=1, intra_op_parallelism_threads=4))
+  eval_results = estimator.evaluate(input_fn=input_fn_eval, eval_methods=["acc", "top5acc"])
+  print(eval_results)
+
+  # for i in range(flags.train_epochs // flags.epochs_between_evals):
+
+  #   estimator = TFEstimator(classifier)
+
+  #   print("Starting to train epoch {} to {}".format(i * flags.epochs_between_evals + 1, (i + 1) * flags.epochs_between_evals))
+  #   estimator.train(input_fn_train, steps=steps_per_epoch * flags.epochs_between_evals, session_config=tf.ConfigProto(inter_op_parallelism_threads=1, intra_op_parallelism_threads=4))
+  #   # print('Starting to evaluate.')
+  #   # eval_results = estimator.evaluate(input_fn=input_fn_eval, eval_methods=["acc", "top5acc"])
+  #   # print(eval_results)
 
 class ResnetArgParser(argparse.ArgumentParser):
   """Arguments for configuring and running a Resnet Model."""

@@ -218,6 +218,8 @@ class BaseParser(argparse.ArgumentParser):
           metavar="<HK>"
       )
 
+    self.add_argument("--val_only", action="store_true", default=False)
+
 
 class PerformanceParser(argparse.ArgumentParser):
   """Default parser for specifying performance tuning arguments.

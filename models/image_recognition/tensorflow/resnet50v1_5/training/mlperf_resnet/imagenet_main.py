@@ -291,6 +291,7 @@ def imagenet_model_fn(features, labels, mode, params):
       decay_rates=[1, 0.1, 0.01, 0.001, 1e-4], base_lr=base_lr,
       enable_lars=params['enable_lars'])
 
+  params['data_format'] = 'channels_last'
   return resnet_run_loop.resnet_model_fn(
       features=features,
       labels=labels,

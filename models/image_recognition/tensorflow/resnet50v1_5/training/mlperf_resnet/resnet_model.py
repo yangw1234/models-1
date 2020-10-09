@@ -33,6 +33,8 @@ from __future__ import print_function
 
 import tensorflow as tf
 
+from pdb_clone import pdb
+
 _BATCH_NORM_DECAY = 0.9
 _BATCH_NORM_EPSILON = 1e-5
 DEFAULT_VERSION = 2
@@ -340,7 +342,10 @@ class Model(object):
       A variable which is cast to fp16 if necessary.
     """
 
+    # print("dtype is ", dtype)
+    # print("name is ", name)
     if dtype in CASTABLE_TYPES:
+      # print("cast")
       var = getter(name, shape, tf.float32, *args, **kwargs)
       return tf.cast(var, dtype=dtype, name=name + '_cast')
     else:
@@ -355,6 +360,8 @@ class Model(object):
     Returns:
       A variable scope for the model.
     """
+
+    # pdb.set_trace_remote()
 
     return tf.compat.v1.variable_scope('resnet_model',
                              custom_getter=self._custom_dtype_getter)
