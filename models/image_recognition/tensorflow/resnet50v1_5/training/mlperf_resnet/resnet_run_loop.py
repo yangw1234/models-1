@@ -31,7 +31,6 @@ import tensorflow as tf  # pylint: disable=g-bad-import-order
 import resnet_model
 import parsers
 
-from pdb_clone import pdb
 from zoo.feature.common import ChainedPreprocessing, FeatureSet
 
 from zoo.feature.image import *
@@ -128,7 +127,8 @@ def get_synth_input_fn(height, width, num_channels, num_classes):
   def input_fn(is_training, data_dir, batch_size, *args, **kwargs):  # pylint: disable=unused-argument
     images = tf.zeros((batch_size * 100, height, width, num_channels), tf.float32)
     labels = tf.zeros((batch_size * 100,), tf.int32)
-    return tf.data.Dataset.from_tensor_slices((images, labels))
+    dataset = tf.data.Dataset.from_tensor_slices((images, labels))
+    return dataset.batch(batch_size)
 
   return input_fn
 

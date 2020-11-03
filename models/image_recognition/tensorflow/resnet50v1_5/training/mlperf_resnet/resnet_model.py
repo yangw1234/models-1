@@ -33,8 +33,6 @@ from __future__ import print_function
 
 import tensorflow as tf
 
-from pdb_clone import pdb
-
 _BATCH_NORM_DECAY = 0.9
 _BATCH_NORM_EPSILON = 1e-5
 DEFAULT_VERSION = 2
